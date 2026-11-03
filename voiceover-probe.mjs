@@ -22,8 +22,10 @@ mkdirSync( outDir, { recursive: true } );
 // Serve the page over http. On a runner, Safari stops a file:// URL at a
 // "Confirm the file to load." prompt. Other requests (the font files) get 404.
 const html = readFileSync( join( here, 'calendar-voiceover-test.html' ) );
+let served = false;
 const server = createServer( ( req, res ) => {
 	if ( req.url.startsWith( '/calendar-voiceover-test.html' ) ) {
+		served = true;
 		res.writeHead( 200, { 'Content-Type': 'text/html; charset=utf-8' } );
 		res.end( html );
 	} else {
@@ -73,18 +75,35 @@ async function step( name ) {
 // Name of the app in front. Without this, a run where Finder kept focus
 // (macOS 26) looked like a run with no tables.
 const frontApp = () => sh( 'lsappinfo info -only name "$(lsappinfo front)"' );
-let shots = 0;
+const screenshot = ( name ) => sh( `screencapture -x "${ join( outDir, `${ name }.png` ) }"` );
 
-// `open -a` loads the URL in a new tab and brings Safari to the front.
-async function openPage() {
-	execSync( `open -a Safari "${ pageUrl }"` );
-	await sleep( 5000 );
-	const front = frontApp();
-	shots++;
-	sh( `screencapture -x "${ join( outDir, `page-${ shots }.png` ) }"` );
-	const top = await step( 'top' );
-	return { ...top, front };
+// Puts the VoiceOver cursor inside the page. On macOS 14, VO-Home lands on
+// Safari's toolbar, and find-next-table from there finds nothing. So move
+// to the "web content" item and interact with it.
+async function enterPage() {
+	const steps = [ await step( 'top' ) ];
+	const onWebContent = () => /web content/i.test( steps.at( -1 ).spoken.join( ' ' ) );
+	for ( let i = 0; i < 6 && ! onWebContent(); i++ ) {
+		steps.push( await step( 'moveToNext' ) );
+	}
+	steps.push( await step( 'interactWithItem' ) );
+	return steps;
 }
+
+// Run on each table after find-next-table lands on it.
+const walk = [
+	'interactWithItem',
+	'moveDown', // Row 2 (Week 44).
+	'moveDown', // Row 3 (Week 45).
+	'moveToNext', // Mon 2.
+	'moveDown', // Mon 9: announces Week 46?
+	'readTableRowAndColumnNumbers',
+	'moveToNext', // Tue 10.
+	'moveDown', // Tue 17: announces Week 47?
+	'readTableRow',
+	'readTableRowAndColumnNumbers',
+	'stopInteractingWithItem',
+];
 
 const out = { versions, pageUrl, finds: [], walks: {} };
 let stopRecording = null;
@@ -99,46 +118,48 @@ try {
 	await sleep( 2000 );
 	seen = ( await voiceOver.spokenPhraseLog() ).length;
 
-	out.finds.push( await openPage() );
-	for ( let i = 0; i < 5; i++ ) {
-		out.finds.push( await step( 'findNextTable' ) );
+	// `open -a` loads the URL and brings Safari to the front. Wait until the
+	// page was served, then give Safari time to render it.
+	execSync( `open -a Safari "${ pageUrl }"` );
+	for ( let i = 0; i < 60 && ! served; i++ ) {
+		await sleep( 500 );
 	}
+	await sleep( 4000 );
+	out.front = frontApp();
+	screenshot( 'page-loaded' );
+	out.enter = await enterPage();
 
+	// One pass, no reloads: find a table, walk it, stop interacting, find the
+	// next. After C, two more finds must not reach D.
 	for ( let n = 1; n <= 3; n++ ) {
-		const steps = [ await openPage() ];
-		for ( let i = 0; i < n; i++ ) {
-			steps.push( await step( 'findNextTable' ) );
-		}
-		for ( const k of [
-			'interactWithItem',
-			'moveDown', // Row 2 (Week 44).
-			'moveDown', // Row 3 (Week 45).
-			'moveToNext', // Mon 2.
-			'moveDown', // Mon 9: announces Week 46?
-			'readTableRowAndColumnNumbers',
-			'moveToNext', // Tue 10.
-			'moveDown', // Tue 17: announces Week 47?
-			'readTableRow',
-			'readTableRowAndColumnNumbers',
-			'stopInteractingWithItem',
-		] ) {
+		const steps = [ await step( 'findNextTable' ) ];
+		out.finds.push( steps[ 0 ] );
+		for ( const k of walk ) {
 			steps.push( await step( k ) );
 		}
 		out.walks[ `table ${ n }` ] = steps;
 	}
+	out.finds.push( await step( 'findNextTable' ) );
+	out.finds.push( await step( 'findNextTable' ) );
+	screenshot( 'page-end' );
 
 	// A quick reading for the job log. The JSON is the evidence.
 	const found = out.finds.flatMap( ( f ) => f.spoken ).join( ' | ' );
+	const walked = Object.values( out.walks )
+		.map( ( s ) => s[ 1 ].spoken.join( ' ' ).match( /\bIn ([A-D]): November 2026 table\b/ )?.[ 1 ] ?? '-' )
+		.join( '' );
 	out.summary = {
 		foundA: /\bA: November 2026 table\b/.test( found ),
 		foundB: /\bB: November 2026 table\b/.test( found ),
 		foundC: /\bC: November 2026 table\b/.test( found ),
 		foundD: /\bD: November 2026\b/.test( found ),
+		walked, // Table entered by each walk; "ABC" when all three were found.
 	};
 
-	// The controls prove the harness works. If C is not found, or D is found,
-	// the A and B results mean nothing, so fail the job.
-	out.summary.controlsPass = out.summary.foundC && ! out.summary.foundD;
+	// The controls prove the harness works. If C is not found or walked, or D
+	// is found, the A and B results mean nothing, so fail the job.
+	out.summary.controlsPass =
+		out.summary.foundC && walked.includes( 'C' ) && ! out.summary.foundD;
 	if ( ! out.summary.controlsPass ) {
 		process.exitCode = 1;
 	}
