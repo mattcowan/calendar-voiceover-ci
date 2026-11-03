@@ -77,16 +77,23 @@ async function step( name ) {
 const frontApp = () => sh( 'lsappinfo info -only name "$(lsappinfo front)"' );
 const screenshot = ( name ) => sh( `screencapture -x "${ join( outDir, `${ name }.png` ) }"` );
 
-// Puts the VoiceOver cursor inside the page. On macOS 14, VO-Home lands on
-// Safari's toolbar, and find-next-table from there finds nothing. So move
-// to the "web content" item and interact with it.
+// Puts the VoiceOver cursor at the top of the page. VO-Home lands in one of
+// three places, and not always the same one on a given macOS: the page's
+// first heading, the "web content" item, or Safari's toolbar (seen on macOS
+// 14), where find-next-table finds nothing. From the toolbar, move to "web
+// content"; from "web content", interact with it. Moving any further can pass
+// table A.
 async function enterPage() {
 	const steps = [ await step( 'top' ) ];
-	const onWebContent = () => /web content/i.test( steps.at( -1 ).spoken.join( ' ' ) );
-	for ( let i = 0; i < 6 && ! onWebContent(); i++ ) {
-		steps.push( await step( 'moveToNext' ) );
+	const last = () => steps.at( -1 ).spoken.join( ' ' );
+	if ( /toolbar/i.test( last() ) ) {
+		for ( let i = 0; i < 6 && ! /web content/i.test( last() ); i++ ) {
+			steps.push( await step( 'moveToNext' ) );
+		}
 	}
-	steps.push( await step( 'interactWithItem' ) );
+	if ( /web content/i.test( last() ) ) {
+		steps.push( await step( 'interactWithItem' ) );
+	}
 	return steps;
 }
 
@@ -114,7 +121,22 @@ try {
 		stopRecording = guidepup.macOSRecord( join( outDir, 'recording.mov' ) );
 	}
 
-	await voiceOver.start();
+	// VoiceOver sometimes fails to start on a fresh runner ("VoiceOver cannot
+	// be started"), so try up to three times.
+	for ( let attempt = 1; ; attempt++ ) {
+		try {
+			await voiceOver.start();
+			break;
+		} catch ( e ) {
+			if ( attempt >= 3 ) {
+				throw e;
+			}
+			try {
+				await voiceOver.stop();
+			} catch {}
+			await sleep( 5000 );
+		}
+	}
 	await sleep( 2000 );
 	seen = ( await voiceOver.spokenPhraseLog() ).length;
 
