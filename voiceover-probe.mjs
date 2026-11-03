@@ -97,8 +97,16 @@ async function enterPage() {
 	return steps;
 }
 
-// Run on each table after find-next-table lands on it.
-const walk = [
+// The tables on the page, in order, by the label that starts each caption.
+// Find-next-table must reach every one. It must never reach month copy D
+// (role="presentation"), which sits between month C and Week A.
+const views = [ 'Week', 'Week grid', 'Day', 'Day grid' ];
+const expected = [ 'A', 'B', 'C', ...views.flatMap( ( v ) => [ 'A', 'B', 'C' ].map( ( k ) => `${ v } ${ k }` ) ) ];
+const labelPattern = /\b(Week grid [ABC]|Week [ABC]|Day grid [ABC]|Day [ABC]|[A-D]): /;
+const labelOf = ( spoken ) => spoken.join( ' ' ).match( labelPattern )?.[ 1 ] ?? null;
+
+// Run on each month table after find-next-table lands on it.
+const monthWalk = [
 	'interactWithItem',
 	'moveDown', // Row 2 (Week 44).
 	'moveDown', // Row 3 (Week 45).
@@ -109,6 +117,23 @@ const walk = [
 	'moveDown', // Tue 17: announces Week 47?
 	'readTableRow',
 	'readTableRowAndColumnNumbers',
+	'stopInteractingWithItem',
+];
+
+// Run on each week and day view table. Cells hold events, so a move to the
+// next item can land on an event link inside the cell; each move is followed
+// by a position read.
+const viewWalk = [
+	'interactWithItem', // Row 1, column 1.
+	'moveDown', // Row 2: the first week, or the day's cell.
+	'readTableRowAndColumnNumbers',
+	'moveToNext',
+	'readTableRowAndColumnNumbers',
+	'moveToNext',
+	'readTableRowAndColumnNumbers',
+	'moveDown', // Row 3 in the week views: announces the next week?
+	'readTableRowAndColumnNumbers',
+	'readTableRow',
 	'stopInteractingWithItem',
 ];
 
@@ -151,37 +176,56 @@ try {
 	screenshot( 'page-loaded' );
 	out.enter = await enterPage();
 
-	// One pass, no reloads: find a table, walk it, stop interacting, find the
-	// next. After C, two more finds must not reach D.
-	for ( let n = 1; n <= 3; n++ ) {
-		const steps = [ await step( 'findNextTable' ) ];
-		out.finds.push( steps[ 0 ] );
-		for ( const k of walk ) {
+	// One pass, no reloads: find a table, walk it, step past it, find the
+	// next. A table that is not found is never walked, and shows as missing.
+	const walked = [];
+	for ( let tries = 0; tries < 30 && walked.length < expected.length; tries++ ) {
+		const find = await step( 'findNextTable' );
+		out.finds.push( find );
+		const label = labelOf( find.spoken );
+		if ( ! label || 'D' === label || walked.includes( label ) ) {
+			// "Last table", D, or a table already walked: VoiceOver kept the
+			// cursor where it was. Step forward and find again.
+			out.finds.push( await step( 'moveToNext' ) );
+			continue;
+		}
+		const steps = [ find ];
+		for ( const k of 1 === label.length ? monthWalk : viewWalk ) {
 			steps.push( await step( k ) );
 		}
-		out.walks[ `table ${ n }` ] = steps;
+		// On macOS 14 and 26, a find straight after "Out of table" sometimes
+		// said "Last table" and stayed in the table. Step past it first.
+		steps.push( await step( 'moveToNext' ) );
+		out.walks[ label ] = steps;
+		walked.push( label );
 	}
 	out.finds.push( await step( 'findNextTable' ) );
 	out.finds.push( await step( 'findNextTable' ) );
 	screenshot( 'page-end' );
 
 	// A quick reading for the job log. The JSON is the evidence.
-	const found = out.finds.flatMap( ( f ) => f.spoken ).join( ' | ' );
-	const walked = Object.values( out.walks )
-		.map( ( s ) => s[ 1 ].spoken.join( ' ' ).match( /\bIn ([A-D]): November 2026 table\b/ )?.[ 1 ] ?? '-' )
-		.join( '' );
+	const finds = out.finds.filter( ( f ) => 'findNextTable' === f.key );
+	const tables = {};
+	for ( const label of expected ) {
+		const find = finds.find( ( f ) => labelOf( f.spoken ) === label )?.spoken.join( ' ' ) ?? '';
+		const size = find.match( /(\d+) columns?, (\d+) rows?/ );
+		const enter = out.walks[ label ]?.[ 1 ].spoken.join( ' ' ) ?? '';
+		tables[ label ] = {
+			found: Boolean( find ),
+			columns: size ? Number( size[ 1 ] ) : null,
+			rows: size ? Number( size[ 2 ] ) : null,
+			entered: enter.startsWith( `In ${ label }: ` ),
+		};
+	}
+	const foundD = finds.some( ( f ) => 'D' === labelOf( f.spoken ) );
 	out.summary = {
-		foundA: /\bA: November 2026 table\b/.test( found ),
-		foundB: /\bB: November 2026 table\b/.test( found ),
-		foundC: /\bC: November 2026 table\b/.test( found ),
-		foundD: /\bD: November 2026\b/.test( found ),
-		walked, // Table entered by each walk; "ABC" when all three were found.
+		tables,
+		foundD,
+		missing: expected.filter( ( l ) => ! tables[ l ].found ),
+		// The controls prove the harness works. If month C is not found and
+		// entered, or D is found, the other results mean nothing.
+		controlsPass: tables.C.found && tables.C.entered && ! foundD,
 	};
-
-	// The controls prove the harness works. If C is not found or walked, or D
-	// is found, the A and B results mean nothing, so fail the job.
-	out.summary.controlsPass =
-		out.summary.foundC && walked.includes( 'C' ) && ! out.summary.foundD;
 	if ( ! out.summary.controlsPass ) {
 		process.exitCode = 1;
 	}
@@ -197,5 +241,5 @@ try {
 	}
 	server.close();
 	writeFileSync( join( outDir, 'voiceover-probe.json' ), JSON.stringify( out, null, 2 ) );
-	console.log( JSON.stringify( out, null, 1 ) );
+	console.log( JSON.stringify( { versions, front: out.front, summary: out.summary, error: out.error }, null, 1 ) );
 }
