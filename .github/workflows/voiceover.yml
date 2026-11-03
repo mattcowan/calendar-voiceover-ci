@@ -1,0 +1,40 @@
+name: VoiceOver calendar test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  voiceover:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Guidepup
+        run: npm install
+
+      - name: Set up VoiceOver for automation
+        run: npx --yes @guidepup/setup@0.29.3 setup --ci --macos-record
+
+      - name: Install screen reader assets
+        run: npx --yes @guidepup/setup@0.29.3 install
+
+      - name: Run the probe
+        run: npm test
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.os }}
+          path: results/
+          if-no-files-found: warn

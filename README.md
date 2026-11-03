@@ -1,0 +1,14 @@
+# Calendar VoiceOver test
+
+This repository runs one test on GitHub's macOS runners. The test checks if Safari and VoiceOver read the GatherPress calendar block as a data table.
+
+The test page has four copies of the same rendered month calendar:
+
+- A: the markup and CSS as shipped, with no ARIA table roles.
+- B: the same markup with ARIA table roles.
+- C: a control. The table elements use their native display values. VoiceOver must read it as a table.
+- D: a control. The table has `role="presentation"`. VoiceOver must not find it as a table.
+
+The workflow uses [Guidepup](https://github.com/guidepup/guidepup) to control VoiceOver. It records each phrase that VoiceOver speaks in `results/voiceover-probe.json`, and uploads the results as a workflow artifact for each runner.
+
+Related: GatherPress/gatherpress#2494 and GatherPress/gatherpress#2552.

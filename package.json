@@ -1,0 +1,11 @@
+{
+	"name": "calendar-voiceover-ci",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@guidepup/guidepup": "0.40.0"
+	},
+	"scripts": {
+		"test": "node voiceover-probe.mjs"
+	}
+}
