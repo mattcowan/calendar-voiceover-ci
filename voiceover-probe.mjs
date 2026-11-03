@@ -7,17 +7,32 @@
 // role="presentation", must not be found as a table).
 import * as guidepup from '@guidepup/guidepup';
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const { voiceOver } = guidepup;
 const here = dirname( fileURLToPath( import.meta.url ) );
-const pageUrl = pathToFileURL( join( here, 'calendar-voiceover-test.html' ) ).href;
 const outDir = join( here, 'results' );
 const sleep = ( ms ) => new Promise( ( r ) => setTimeout( r, ms ) );
 
 mkdirSync( outDir, { recursive: true } );
+
+// Serve the page over http. On a runner, Safari stops a file:// URL at a
+// "Confirm the file to load." prompt. Other requests (the font files) get 404.
+const html = readFileSync( join( here, 'calendar-voiceover-test.html' ) );
+const server = createServer( ( req, res ) => {
+	if ( req.url.startsWith( '/calendar-voiceover-test.html' ) ) {
+		res.writeHead( 200, { 'Content-Type': 'text/html; charset=utf-8' } );
+		res.end( html );
+	} else {
+		res.writeHead( 404 );
+		res.end();
+	}
+} );
+await new Promise( ( r ) => server.listen( 0, '127.0.0.1', r ) );
+const pageUrl = `http://127.0.0.1:${ server.address().port }/calendar-voiceover-test.html`;
 
 const sh = ( cmd ) => {
 	try {
@@ -55,17 +70,23 @@ async function step( name ) {
 	return { key: name, spoken };
 }
 
+// Name of the app in front. Without this, a run where Finder kept focus
+// (macOS 26) looked like a run with no tables.
+const frontApp = () => sh( 'lsappinfo info -only name "$(lsappinfo front)"' );
+let shots = 0;
+
+// `open -a` loads the URL in a new tab and brings Safari to the front.
 async function openPage() {
-	execSync(
-		`osascript -e 'tell application "Safari"' -e 'activate' ` +
-			`-e 'if (count of windows) is 0 then make new document' ` +
-			`-e 'set URL of front document to "${ pageUrl }"' -e 'end tell'`
-	);
+	execSync( `open -a Safari "${ pageUrl }"` );
 	await sleep( 5000 );
-	return step( 'top' );
+	const front = frontApp();
+	shots++;
+	sh( `screencapture -x "${ join( outDir, `page-${ shots }.png` ) }"` );
+	const top = await step( 'top' );
+	return { ...top, front };
 }
 
-const out = { versions, finds: [], walks: {} };
+const out = { versions, pageUrl, finds: [], walks: {} };
 let stopRecording = null;
 
 try {
@@ -114,6 +135,13 @@ try {
 		foundC: /\bC: November 2026 table\b/.test( found ),
 		foundD: /\bD: November 2026\b/.test( found ),
 	};
+
+	// The controls prove the harness works. If C is not found, or D is found,
+	// the A and B results mean nothing, so fail the job.
+	out.summary.controlsPass = out.summary.foundC && ! out.summary.foundD;
+	if ( ! out.summary.controlsPass ) {
+		process.exitCode = 1;
+	}
 } catch ( e ) {
 	out.error = String( e?.stack || e );
 	process.exitCode = 1;
@@ -124,6 +152,7 @@ try {
 	if ( stopRecording ) {
 		stopRecording();
 	}
+	server.close();
 	writeFileSync( join( outDir, 'voiceover-probe.json' ), JSON.stringify( out, null, 2 ) );
 	console.log( JSON.stringify( out, null, 1 ) );
 }
